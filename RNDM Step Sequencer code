@@ -1,0 +1,783 @@
+desc:RNDM Sequencer by AG-KW
+author:AG-KW.de
+version:1.4.5
+about:RNDM MIDI Step Sequencer by AG-KW
+options:gfx_only
+
+@init
+  ext_noinit=1;
+  initialized==0 ? (
+  steps=8;
+  direction=0;
+  rate_index=2;
+  swing_amt=0;
+  channel=1;
+  base_note=60;
+  quantize=1;
+  root_note=0;
+  scale_type=0;
+
+  selected_lane=0;
+  selected_step=0;
+  lane_count=7;
+  global_end=7;
+  current_step=0;
+
+  pitch_base=0;
+  octave_base=16;
+  velocity_base=32;
+  length_base=48;
+  ratchet_base=64;
+  condition_base=80;
+  shift_base=96;
+  active_base=112;
+
+  lane_dir_base=128;
+  lane_start_base=144;
+  lane_end_base=160;
+  lane_min_base=176;
+  lane_max_base=192;
+  lane_random_base=208;
+  lane_steps_base=224;
+  current_lane_base=240;
+  collapsed_base=260;
+  range_base=280;
+
+  random_state=193847;
+
+  i=0;
+  loop(16,
+    mem[pitch_base+i]=0;
+    mem[octave_base+i]=0;
+    mem[velocity_base+i]=100;
+    mem[length_base+i]=74;
+    mem[ratchet_base+i]=0;
+    mem[condition_base+i]=0;
+    mem[shift_base+i]=0;
+    mem[active_base+i]=0;
+    i+=1;
+  );
+
+  i=0;
+  loop(7,
+    mem[current_lane_base+i]=0;
+    mem[collapsed_base+i]=0;
+    mem[lane_dir_base+i]=0;
+    mem[lane_start_base+i]=0;
+    mem[lane_end_base+i]=7;
+    mem[lane_min_base+i]=0;
+    mem[lane_max_base+i]=127;
+    mem[lane_random_base+i]=1;
+    mem[lane_steps_base+i]=8;
+    i+=1;
+  );
+
+  mem[lane_min_base+0]=-12;
+  mem[lane_max_base+0]=12;
+
+  mem[lane_min_base+1]=-3;
+  mem[lane_max_base+1]=3;
+
+  mem[lane_min_base+2]=0;
+  mem[lane_max_base+2]=127;
+
+  mem[lane_min_base+3]=0;
+  mem[lane_max_base+3]=100;
+
+  mem[lane_min_base+4]=0;
+  mem[lane_max_base+4]=6;
+
+  mem[lane_min_base+5]=-10;
+  mem[lane_max_base+5]=10;
+
+  mem[lane_min_base+6]=0;
+  mem[lane_max_base+6]=100;
+
+  // Dice ranges are measured from zero: bipolar lanes span symmetrically around 0; velocity spans 0..Range.
+  mem[range_base+0]=24;
+  mem[range_base+1]=1;
+  mem[range_base+2]=127;
+
+  last_step=-999999;
+  global_last_step=7;
+  pending_on=-1;
+  pending_on_note=60;
+  pending_on_vel=100;
+  pending_on_channel=1;
+  note_active=0;
+  active_note=60;
+  note_off_beat=-1;
+
+  seq_clock_valid=0;
+  seq_beat=0;
+  pending_off=-1;
+  pending_note=60;
+  pending_channel=1;
+
+  dropdown=-1;
+  dropdown_lane=0;
+
+  mouse_was_down=0;
+  mouse_was_right=0;
+  drag_active=0;
+  drag_lane=-1;
+  drag_step=0;
+  drag_y=218;
+  drag_start_mouse_y=0;
+  drag_start_value=0;
+  last_midi_pos=-1;
+  initialized=1;
+  );
+
+  function clamp(x,a,b) (
+    min(max(x,a),b);
+  );
+
+  function rand01() (
+    random_state=(random_state*16807)%2147483647;
+    random_state/2147483647;
+  );
+
+  function lane_base(l) (
+    l==0 ? pitch_base :
+    l==1 ? octave_base :
+    l==2 ? velocity_base :
+    l==3 ? length_base :
+    l==4 ? ratchet_base :
+    l==5 ? condition_base :
+    shift_base;
+  );
+
+  function lane_lo(l) (
+    mem[lane_min_base+l];
+  );
+
+  function lane_hi(l) (
+    mem[lane_max_base+l];
+  );
+
+  function lane_range_max(l) (
+    l==0 ? 24 : l==1 ? 6 : l==2 ? 127 : 0;
+  );
+
+  function lane_range_min(l) (
+    l==1 ? 1 : 0;
+  );
+
+  function lane_default(l) (
+    l==0 ? 0 : l==1 ? 0 : l==2 ? 100 : l==3 ? 74 : l==4 ? 0 : l==5 ? 0 : 0;
+  );
+
+  // Rates sorted from shortest to longest note value.
+  // 1/32, 1/16T, 1/16, 1/8T, 1/8, 1/4T, 1/4, 1/2T, 1/2, 1/1.
+  function rate_beats(r) (
+    r==0 ? 0.125 :
+    r==1 ? 1/6 :
+    r==2 ? 0.25 :
+    r==3 ? 1/3 :
+    r==4 ? 0.5 :
+    r==5 ? 2/3 :
+    r==6 ? 1 :
+    r==7 ? 4/3 :
+    r==8 ? 2 :
+    4;
+  );
+
+  function send_note_on(offset,n,v,ch) local(c) (
+    ch==0 ? (
+      c=0; loop(16, midisend(offset,$x90|c,n,v); c+=1;);
+    ) : midisend(offset,$x90|((ch-1)&15),n,v);
+  );
+
+  function send_note_off(offset,n,ch) local(c) (
+    ch==0 ? (
+      c=0; loop(16, midisend(offset,$x80|c,n,0); c+=1;);
+    ) : midisend(offset,$x80|((ch-1)&15),n,0);
+  );
+
+  function lane_step(absolute_step,l) local(st,len,d,p,cycle,pos,period) (
+    // Each lane advances on its own clock phase and repeats at its own length.
+    // Do not derive this from global_step: the global pattern length may differ.
+    st=absolute_step;
+    len=max(1,min(steps,mem[lane_steps_base+l]));
+    d=mem[lane_dir_base+l];
+    p=((st%len)+len)%len;
+    cycle=floor(st/len);
+    d==0 ? p :
+    d==1 ? len-1-p :
+    d==2 ? (period=max(1,2*len-2); pos=st%period; pos<len ? pos : period-pos) :
+    d==3 ? (cycle%2 ? len-1-p : p) :
+    floor(rand01()*len);
+  );
+
+  function do_random(l) local(i,v,lo,hi,b,rng,base,default_value,offset) (
+    lo=lane_lo(l);
+    hi=lane_hi(l);
+    b=lane_base(l);
+    rng=mem[range_base+l];
+    default_value=lane_default(l);
+
+    i=0;
+    loop(16,
+      l<3 ? (
+        // Range is a maximum deviation from the current step value.
+        // A neutral/default step uses its neutral/default value as the centre.
+        // PITCH: +/- semitones; OCTAVE: +/- octaves; VELOCITY: +/- velocity.
+        base=mem[b+i]==default_value ? default_value : mem[b+i];
+        offset=floor(rand01()*(2*rng+1))-rng;
+        v=base+offset;
+      ) : (
+        v=floor(rand01()*(hi-lo+1))+lo;
+      );
+      mem[b+i]=clamp(v,lo,hi);
+      i+=1;
+    );
+  );
+
+  function do_random_all() local(l) (
+    l=0;
+    loop(7,
+      do_random(l);
+      l+=1;
+    );
+  );
+
+  function do_reset(l) local(i,b,def) (
+    b=lane_base(l);
+
+    def=
+      l==0 ? 0 :
+      l==1 ? 0 :
+      l==2 ? 100 :
+      l==3 ? 74 :
+      l==4 ? 0 :
+      l==5 ? 0 :
+      0;
+
+    i=0;
+    loop(16,
+      mem[b+i]=def;
+      i+=1;
+    );
+  );
+
+  function scale_note(n,root,scale) local(pc,i,best,bestd,allowed,d,delta) (
+    // Chromatic and atonal contain all twelve pitch classes.
+    scale==0 || scale==10 ? n : (
+      pc=(n-root)%12;
+      pc<0 ? pc+=12;
+      best=0; bestd=99; i=0;
+      loop(12,
+        allowed=0;
+        // 1 major, 2 natural minor, 3 dorian, 4 lydian,
+        // 5 harmonic minor, 6 harmonic major, 7 major pentatonic,
+        // 8 minor pentatonic, 9 melodic minor.
+        scale==1 ? ((i==0||i==2||i==4||i==5||i==7||i==9||i==11) ? allowed=1;);
+        scale==2 ? ((i==0||i==2||i==3||i==5||i==7||i==8||i==10) ? allowed=1;);
+        scale==3 ? ((i==0||i==2||i==3||i==5||i==7||i==9||i==10) ? allowed=1;);
+        scale==4 ? ((i==0||i==2||i==4||i==6||i==7||i==9||i==11) ? allowed=1;);
+        scale==5 ? ((i==0||i==2||i==3||i==5||i==7||i==8||i==11) ? allowed=1;);
+        scale==6 ? ((i==0||i==2||i==4||i==5||i==7||i==8||i==11) ? allowed=1;);
+        scale==7 ? ((i==0||i==2||i==4||i==7||i==9) ? allowed=1;);
+        scale==8 ? ((i==0||i==3||i==5||i==7||i==10) ? allowed=1;);
+        scale==9 ? ((i==0||i==2||i==3||i==5||i==7||i==9||i==11) ? allowed=1;);
+        allowed ? (
+          d=abs(pc-i); d>6 ? d=12-d;
+          d<bestd ? (bestd=d; best=i;);
+        );
+        i+=1;
+      );
+      delta=best-pc; delta>6 ? delta-=12; delta< -6 ? delta+=12;
+      n+delta;
+    );
+  );
+
+@block
+  step_beats=rate_beats(rate_index);
+  playing=(play_state&1);
+
+  playing ? (
+    // Continue note events that were scheduled beyond the previous audio block.
+    pending_on>=0 ? (
+      pending_on<samplesblock ? (
+        send_note_on(pending_on,pending_on_note,pending_on_vel,pending_on_channel);
+        pending_on=-1;
+      ) : pending_on-=samplesblock;
+    );
+    pending_off>=0 ? (
+      pending_off<samplesblock ? (
+        send_note_off(pending_off,pending_note,pending_channel);
+        pending_off=-1;
+      ) : pending_off-=samplesblock;
+    );
+
+    s=0;
+    loop(samplesblock,
+      // Follow the actual REAPER playhead, including loop wraps and seeks.
+      q=beat_position+s*tempo/(60*srate);
+      raw=floor(q/step_beats);
+      raw!=last_step ? (
+        last_step=raw;
+        active_steps=steps;
+        global_step=((raw%active_steps)+active_steps)%active_steps;
+        direction==1 ? global_step=active_steps-1-global_step;
+        direction==2 ? global_step=(global_step<active_steps/2 ? global_step*2 : active_steps-1-(global_step-active_steps/2)*2);
+        direction==3 ? global_step=(global_step%2==0 ? floor(global_step/2) : active_steps-1-floor(global_step/2));
+        direction==4 ? global_step=floor(rand01()*active_steps);
+        current_step=global_step;
+
+        ps=lane_step(raw,0);
+        os=lane_step(raw,1);
+        vs=lane_step(raw,2);
+        ls=lane_step(raw,3);
+        rs=lane_step(raw,4);
+        cs=lane_step(raw,5);
+        ts=lane_step(raw,6);
+        mem[current_lane_base+0]=ps;
+        mem[current_lane_base+1]=os;
+        mem[current_lane_base+2]=vs;
+        mem[current_lane_base+3]=ls;
+        mem[current_lane_base+4]=rs;
+        mem[current_lane_base+5]=cs;
+        mem[current_lane_base+6]=ts;
+        active=mem[active_base+global_step];
+
+        active ? (
+          n=clamp(base_note+mem[pitch_base+ps]+mem[octave_base+os]*12,0,127);
+          n=scale_note(n,root_note,scale_type);
+          v=clamp(mem[velocity_base+vs],0,127);
+          v>0 ? (
+            gate=clamp(mem[length_base+ls],0,100)/100;
+            rat=1+clamp(mem[ratchet_base+rs],0,6);
+            k=0;
+            loop(rat,
+              swing_delay=(raw%2==1) ? step_beats*swing_amt/3 : 0;
+              event_offset=s+floor((swing_delay+k*(step_beats/rat))*60/tempo*srate);
+              event_offset<samplesblock ?
+                send_note_on(event_offset,n,v,channel) :
+                (pending_on=event_offset-samplesblock; pending_on_note=n; pending_on_vel=v; pending_on_channel=channel;);
+              off_offset=event_offset+max(1,floor((step_beats/rat)*gate*60/tempo*srate));
+              off_offset<samplesblock ?
+                send_note_off(off_offset,n,channel) :
+                (pending_note=n; pending_off=off_offset-samplesblock; pending_channel=channel;);
+              k+=1;
+            );
+          );
+        );
+      );
+      s+=1;
+    );
+  ) : (
+    // Reset only the playback edge detector. Pattern data is never reset by transport.
+    last_step=-999999;
+    pending_on=-1;
+    pending_off=-1;
+  );
+
+  while(midirecv(offset,msg1,msg2,msg3)) (
+    midisend(offset,msg1,msg2,msg3);
+  );
+
+@gfx 1180 700
+  // Render on a fixed virtual canvas, then scale to the actual REAPER window.
+  gfx_getimgdim(0,iw,ih);
+  (iw!=1180 || ih!=700) ? gfx_setimgdim(0,1180,700);
+  sx=max(0.25,gfx_w/1180);
+  sy=max(0.25,gfx_h/700);
+  mx=mouse_x/sx;
+  my=mouse_y/sy;
+  gfx_dest=0;
+
+  gfx_r=0.055; gfx_g=0.067; gfx_b=0.078; gfx_a=1;
+  gfx_rect(0,0,1180,700);
+
+  // Header
+  gfx_r=0.10; gfx_g=0.13; gfx_b=0.15; gfx_rect(0,0,1180,62);
+  gfx_r=0.28; gfx_g=0.78; gfx_b=0.91;
+  gfx_setfont(1,"Arial",24); gfx_x=22; gfx_y=20; gfx_printf("RNDM");
+  gfx_r=0.94; gfx_g=0.96; gfx_b=0.97; gfx_x=85; gfx_printf("SEQUENCER");
+
+  // Global random dice
+  gfx_r=0.12; gfx_g=0.18; gfx_b=0.21; gfx_rect(258,13,38,36);
+  gfx_r=0.25; gfx_g=0.78; gfx_b=0.91; gfx_rect(265,19,24,24);
+  gfx_r=0.04; gfx_g=0.07; gfx_b=0.08;
+  gfx_circle(271,25,2,1); gfx_circle(283,25,2,1); gfx_circle(277,31,2,1);
+  gfx_circle(271,37,2,1); gfx_circle(283,37,2,1);
+  gfx_r=0.57; gfx_g=0.65; gfx_b=0.69; gfx_setfont(2,"Arial",12);
+  gfx_x=1010; gfx_y=24; gfx_printf("AG-KW  /  MIDI");
+
+  // Global controls: scale, root, total steps, global last step, direction, rate, swing and channel.
+  gfx_r=0.11; gfx_g=0.15; gfx_b=0.17;
+  gfx_rect(18,76,140,42); gfx_rect(166,76,84,42); gfx_rect(258,76,100,42);
+  gfx_rect(366,76,130,42); gfx_rect(504,76,108,42);
+  gfx_rect(620,76,150,42); gfx_rect(778,76,90,42);
+  gfx_r=0.92; gfx_g=0.95; gfx_b=0.96; gfx_setfont(2,"Arial",13);
+  gfx_x=28; gfx_y=90; gfx_printf("%s  v",scale_type==0?"CHROMATIC":scale_type==1?"MAJOR":scale_type==2?"MINOR":scale_type==3?"DORIAN":scale_type==4?"LYDIAN":scale_type==5?"HARM. MINOR":scale_type==6?"HARM. MAJOR":scale_type==7?"PENTA MAJOR":scale_type==8?"PENTA MINOR":scale_type==9?"MELODIC MINOR":"ATONAL");
+  gfx_x=176; gfx_y=90; gfx_printf("%s  v",root_note==0?"C":root_note==1?"C#":root_note==2?"D":root_note==3?"D#":root_note==4?"E":root_note==5?"F":root_note==6?"F#":root_note==7?"G":root_note==8?"G#":root_note==9?"A":root_note==10?"A#":"B");
+  gfx_x=270; gfx_y=90; gfx_printf("%d STEPS  v",steps);
+  gfx_x=378; gfx_y=90; gfx_printf("%s  v",direction==0?"FORWARD":direction==1?"BACKWARD":direction==2?"ALTERNATE":direction==3?"SNAKE":"RANDOM");
+  gfx_x=516; gfx_y=90; gfx_printf("%s  v",rate_index==0?"1/32":rate_index==1?"1/16T":rate_index==2?"1/16":rate_index==3?"1/8T":rate_index==4?"1/8":rate_index==5?"1/4T":rate_index==6?"1/4":rate_index==7?"1/2T":rate_index==8?"1/2":"1/1");
+  // Continuous swing slider, 0-75%.
+  gfx_r=0.10; gfx_g=0.14; gfx_b=0.16; gfx_rect(628,87,130,7);
+  gfx_r=0.18; gfx_g=0.72; gfx_b=0.86; gfx_rect(628,87,130*swing_amt/0.75,7);
+  gfx_r=0.82; gfx_g=0.90; gfx_b=0.93; gfx_rect(624+130*swing_amt/0.75,82,8,17);
+  gfx_r=0.92; gfx_g=0.95; gfx_b=0.96; gfx_setfont(2,"Arial",12); gfx_x=638; gfx_y=101; gfx_printf("SWING %.0f%%",swing_amt*100);
+  gfx_x=790; gfx_y=90; gfx_printf("%s  v",channel==0?"ALL":channel==1?"CH 1":channel==2?"CH 2":channel==3?"CH 3":channel==4?"CH 4":channel==5?"CH 5":channel==6?"CH 6":channel==7?"CH 7":channel==8?"CH 8":channel==9?"CH 9":channel==10?"CH 10":channel==11?"CH 11":channel==12?"CH 12":channel==13?"CH 13":channel==14?"CH 14":channel==15?"CH 15":"CH 16");
+
+  // Main panel, active-step lane, and a visible column-heading row.
+  gfx_r=0.09; gfx_g=0.12; gfx_b=0.14; gfx_rect(18,136,1142,514);
+  gfx_r=0.13; gfx_g=0.17; gfx_b=0.19; gfx_rect(28,145,304,38);
+  gfx_r=0.90; gfx_g=0.94; gfx_b=0.96; gfx_setfont(2,"Arial",12);
+  gfx_x=36; gfx_y=158; gfx_printf("ACTIVE STEPS");
+  colw=792/steps;
+  j=0;
+  loop(16,
+    x=340+j*colw;
+    j<steps ? (
+      gfx_r=0.07; gfx_g=0.095; gfx_b=0.11; gfx_rect(x,145,colw-5,38);
+      j<=global_end && mem[active_base+j] ? (
+        gfx_r=0.96; gfx_g=0.62; gfx_b=0.12; gfx_rect(x,145,colw-5,38);
+      );
+      gfx_r=0.88; gfx_g=0.92; gfx_b=0.94; gfx_setfont(2,"Arial",10);
+      gfx_x=x+6; gfx_y=148; gfx_printf("%d",j+1);
+    );
+    j+=1;
+  );
+
+  // Clear, visible headings replacing the text that was clipped between rows.
+  gfx_r=0.12; gfx_g=0.16; gfx_b=0.18; gfx_rect(28,190,304,22);
+  gfx_r=0.60; gfx_g=0.70; gfx_b=0.74; gfx_setfont(2,"Arial",10);
+  gfx_x=36; gfx_y=196; gfx_printf("LANE / DIRECTION");
+  gfx_x=154; gfx_printf("RND");
+  gfx_x=205; gfx_printf("RESET");
+  gfx_x=250; gfx_printf("RANGE");
+  gfx_r=0.12; gfx_g=0.16; gfx_b=0.18; gfx_rect(340,190,792,22);
+  gfx_r=0.60; gfx_g=0.70; gfx_b=0.74; gfx_x=348; gfx_y=196; gfx_printf("STEP VALUES  |  LEFT-CLICK: EDIT  |  RIGHT-CLICK: SET LANE LENGTH");
+
+  // Seven lanes. Length, Ratchet, Condition and Time Shift can be collapsed.
+  lane_y=218;
+  lane=0;
+  loop(7,
+    collapsed=(lane>=3 && mem[collapsed_base+lane]!=0);
+    y=lane_y;
+    lane_h=collapsed ? 26 : 54;
+
+    lr=lane==0?0.10:lane==1?0.18:lane==2?0.19:lane==3?0.21:lane==4?0.14:lane==5?0.13:0.16;
+    lg=lane==0?0.25:lane==1?0.18:lane==2?0.20:lane==3?0.17:lane==4?0.19:lane==5?0.20:0.18;
+    lb=lane==0?0.34:lane==1?0.17:lane==2?0.15:lane==3?0.12:lane==4?0.31:lane==5?0.30:0.23;
+    lane==selected_lane ? (lr=min(1,lr+0.07); lg=min(1,lg+0.07); lb=min(1,lb+0.07););
+    gfx_r=lr; gfx_g=lg; gfx_b=lb; gfx_rect(28,y,116,lane_h);
+
+    gfx_r=0.90; gfx_g=0.94; gfx_b=0.96; gfx_setfont(2,"Arial",12);
+    gfx_x=36; gfx_y=y+(collapsed?7:9);
+    gfx_printf("%s",lane==0?"PITCH":lane==1?"OCTAVE":lane==2?"VELOCITY":lane==3?"LENGTH":lane==4?"RATCHET":lane==5?"CONDITION":"TIME SHIFT");
+
+    collapsed ? (
+      // Compact row: click [+] to reopen.
+      gfx_r=0.16; gfx_g=0.22; gfx_b=0.25; gfx_rect(150,y,42,lane_h);
+      gfx_r=0.16; gfx_g=0.22; gfx_b=0.25; gfx_rect(290,y,30,lane_h);
+      gfx_r=0.72; gfx_g=0.82; gfx_b=0.86; gfx_rect(294,y+4,22,18);
+      gfx_r=0.07; gfx_g=0.10; gfx_b=0.12; gfx_rect(296,y+6,18,14);
+      gfx_r=0.90; gfx_g=0.94; gfx_b=0.96; gfx_setfont(2,"Arial",12);
+      gfx_x=302; gfx_y=y+7; gfx_printf("+");
+      gfx_r=0.60; gfx_g=0.70; gfx_b=0.74; gfx_setfont(2,"Arial",10);
+      gfx_x=340; gfx_y=y+7; gfx_printf("COLLAPSED - CLICK + TO EDIT LANE");
+    ) : (
+      gfx_r=0.55; gfx_g=0.68; gfx_b=0.73; gfx_setfont(2,"Arial",10); gfx_x=36; gfx_y=y+30;
+      gfx_printf("%s  v",mem[lane_dir_base+lane]==0?"FORWARD":mem[lane_dir_base+lane]==1?"BACKWARD":mem[lane_dir_base+lane]==2?"ALTERNATE":mem[lane_dir_base+lane]==3?"SNAKE":"RANDOM");
+
+      // Random dice
+      gfx_r=0.16; gfx_g=0.22; gfx_b=0.25; gfx_rect(150,y,42,54);
+      cr=lane==0?0.20:lane==1?0.90:lane==2?0.25:lane==3?0.95:lane==4?0.75:lane==5?0.55:0.25;
+      cg=lane==0?0.72:lane==1?0.58:lane==2?0.78:lane==3?0.55:lane==4?0.45:lane==5?0.70:0.60;
+      cb=lane==0?0.92:lane==1?0.25:lane==2?0.40:lane==3?0.20:lane==4?0.95:lane==5?0.90:0.72;
+      gfx_r=cr; gfx_g=cg; gfx_b=cb; gfx_rect(157,y+13,28,28);
+      gfx_r=0.04; gfx_g=0.07; gfx_b=0.08;
+      gfx_circle(164,y+20,2.2,1); gfx_circle(178,y+20,2.2,1); gfx_circle(171,y+27,2.2,1);
+      gfx_circle(164,y+34,2.2,1); gfx_circle(178,y+34,2.2,1);
+
+      // Reset button and collapse toggle for the four optional lanes.
+      gfx_r=0.16; gfx_g=0.22; gfx_b=0.25; gfx_rect(198,y,42,54);
+      gfx_r=0.72; gfx_g=0.82; gfx_b=0.86; gfx_rect(206,y+15,26,24);
+      gfx_r=0.07; gfx_g=0.10; gfx_b=0.12; gfx_rect(208,y+17,22,20);
+      gfx_r=0.90; gfx_g=0.94; gfx_b=0.96; gfx_setfont(2,"Arial",12);
+      gfx_x=215; gfx_y=y+20; gfx_printf("R");
+      lane<3 ? (
+        // RANGE control: vertical mouse-fillable amount used by the dice only.
+        gfx_r=0.16; gfx_g=0.22; gfx_b=0.25; gfx_rect(244,y,42,54);
+        gfx_r=0.07; gfx_g=0.10; gfx_b=0.12; gfx_rect(250,y+7,30,34);
+        range_max=lane_range_max(lane);
+        range_min=lane_range_min(lane);
+        range_h=30*mem[range_base+lane]/max(1,range_max);
+        gfx_r=0.22; gfx_g=0.72; gfx_b=0.84; gfx_rect(250,y+41-range_h,30,range_h);
+        gfx_r=0.90; gfx_g=0.94; gfx_b=0.96; gfx_setfont(2,"Arial",10);
+        gfx_x=255; gfx_y=y+43; gfx_printf("%.0f",mem[range_base+lane]);
+      );
+      lane>=3 ? (
+        gfx_r=0.16; gfx_g=0.22; gfx_b=0.25; gfx_rect(290,y,30,54);
+        gfx_r=0.72; gfx_g=0.82; gfx_b=0.86; gfx_rect(294,y+15,22,24);
+        gfx_r=0.07; gfx_g=0.10; gfx_b=0.12; gfx_rect(296,y+17,18,20);
+        gfx_r=0.90; gfx_g=0.94; gfx_b=0.96; gfx_setfont(2,"Arial",12);
+        gfx_x=302; gfx_y=y+20; gfx_printf("-");
+      );
+
+      // Step cells and lane-specific value bars.
+      j=0;
+      loop(16,
+        x=340+j*colw;
+        j<steps ? (
+          cell_active=(j<=global_end && mem[active_base+j]!=0 && j<mem[lane_steps_base+lane]);
+          length_default_visible=(lane==3 && j<=global_end && j<mem[lane_steps_base+lane]);
+          (cell_active || length_default_visible) ? (
+            cell_active ? (
+              gfx_r=0.07; gfx_g=0.095; gfx_b=0.11;
+            ) : (
+              gfx_r=0.055; gfx_g=0.063; gfx_b=0.068;
+            );
+            gfx_rect(x,y,colw-5,54);
+            val=mem[lane_base(lane)+j]; lo=lane_lo(lane); hi=lane_hi(lane);
+            cell_active ? (
+              gfx_r=cr; gfx_g=cg; gfx_b=cb;
+            ) : (
+              gfx_r=cr*0.35; gfx_g=cg*0.35; gfx_b=cb*0.35;
+            );
+            (lane==0 || lane==1 || lane==5) ? (
+              midy=y+27; barh=abs(val)/max(abs(lo),abs(hi))*22;
+              val>=0 ? gfx_rect(x+7,midy-barh,colw-19,barh) : gfx_rect(x+7,midy,colw-19,barh);
+              gfx_r=0.65; gfx_g=0.69; gfx_b=0.72; gfx_rect(x+4,midy,colw-13,1);
+            ) : (
+              norm=clamp((val-lo)/max(1,hi-lo),0,1); barh=norm*31;
+              gfx_rect(x+7,y+39-barh,colw-19,barh);
+            );
+            mem[current_lane_base+lane]==j ? (
+              gfx_r=min(1,cr+0.15); gfx_g=min(1,cg+0.15); gfx_b=min(1,cb+0.15);
+              gfx_a=0.55; gfx_rect(x,y,colw-5,54); gfx_a=1;
+            );
+            cell_active ? (gfx_r=0.85; gfx_g=0.91; gfx_b=0.94;) : (gfx_r=0.48; gfx_g=0.53; gfx_b=0.56;);
+            gfx_setfont(2,"Arial",10);
+            gfx_x=x+6; gfx_y=y+4; gfx_printf("%d",j+1);
+            gfx_x=x+6; gfx_y=y+42; gfx_printf("%.0f",val);
+          ) : (
+            gfx_r=0.085; gfx_g=0.095; gfx_b=0.10; gfx_rect(x,y,colw-5,54);
+            gfx_r=0.34; gfx_g=0.39; gfx_b=0.41; gfx_setfont(2,"Arial",10);
+            gfx_x=x+6; gfx_y=y+4; gfx_printf("%d",j+1);
+          );
+        );
+        j+=1;
+      );
+    );
+    lane_y+=lane_h+8;
+    lane+=1;
+  );
+
+  // Footer
+  gfx_r=0.11; gfx_g=0.15; gfx_b=0.17; gfx_rect(18,660,1142,32);
+  gfx_r=0.55; gfx_g=0.66; gfx_b=0.70; gfx_setfont(2,"Arial",11); gfx_x=30; gfx_y=670;
+  gfx_printf("Selected: %s   |   Dice = random values within RANGE   |   R = reset lane   |   Right-click a lane step = set lane length   |   +/- = collapse/expand optional lanes",selected_lane==0?"PITCH":selected_lane==1?"OCTAVE":selected_lane==2?"VELOCITY":selected_lane==3?"LENGTH":selected_lane==4?"RATCHET":selected_lane==5?"CONDITION":"TIME SHIFT");
+
+  // Dropdown overlays
+  dropdown>=0 ? (
+    dropdown==9 ? (menu_x=28; menu_y=dropdown_y+26; menu_w=130; menu_count=5; menu_y+menu_count*25+8>690 ? menu_y=dropdown_y-menu_count*25+28;) : (
+      menu_x=dropdown==0?258:dropdown==1?366:dropdown==2?504:dropdown==4?778:dropdown==6?18:166;
+      menu_y=120;
+      menu_w=dropdown==0?100:dropdown==1?130:dropdown==2?108:dropdown==4?90:dropdown==6?180:84;
+      menu_count=dropdown==0?2:dropdown==1?5:dropdown==2?10:dropdown==4?17:dropdown==6?11:12;
+    );
+    gfx_r=0.08; gfx_g=0.11; gfx_b=0.13; gfx_rect(menu_x,menu_y,menu_w,menu_count*25+8);
+    mi=0;
+    loop(menu_count,
+      myy=menu_y+4+mi*25; gfx_r=0.12; gfx_g=0.16; gfx_b=0.18; gfx_rect(menu_x+3,myy,menu_w-6,22);
+      gfx_r=0.91; gfx_g=0.95; gfx_b=0.97; gfx_setfont(2,"Arial",11); gfx_x=menu_x+9; gfx_y=myy+5;
+      dropdown==0 ? gfx_printf("%d steps",mi==0?8:16);
+      dropdown==1 ? gfx_printf("%s",mi==0?"FORWARD":mi==1?"BACKWARD":mi==2?"ALTERNATE":mi==3?"SNAKE":"RANDOM");
+      dropdown==2 ? gfx_printf("%s",mi==0?"1/32":mi==1?"1/16T":mi==2?"1/16":mi==3?"1/8T":mi==4?"1/8":mi==5?"1/4T":mi==6?"1/4":mi==7?"1/2T":mi==8?"1/2":"1/1");
+      dropdown==4 ? (mi==0 ? gfx_printf("All channels") : gfx_printf("Channel %d",mi));
+      dropdown==6 ? gfx_printf("%s",mi==0?"CHROMATIC":mi==1?"MAJOR":mi==2?"MINOR":mi==3?"DORIAN":mi==4?"LYDIAN":mi==5?"HARM. MINOR":mi==6?"HARM. MAJOR":mi==7?"PENTA MAJOR":mi==8?"PENTA MINOR":mi==9?"MELODIC MINOR":"ATONAL");
+      dropdown==7 ? gfx_printf("%s",mi==0?"C":mi==1?"C#":mi==2?"D":mi==3?"D#":mi==4?"E":mi==5?"F":mi==6?"F#":mi==7?"G":mi==8?"G#":mi==9?"A":mi==10?"A#":"B");
+      dropdown==9 ? gfx_printf("%s",mi==0?"FORWARD":mi==1?"BACKWARD":mi==2?"ALTERNATE":mi==3?"SNAKE":"RANDOM");
+      mi+=1;
+    );
+  );
+
+  // Mouse handling uses virtual 1180x700 coordinates.
+  md=mouse_cap&1; rd=mouse_cap&2;
+  pressed=md && !mouse_was_down; rpressed=rd && !mouse_was_right;
+  md && my>=80 && my<=113 && mx>=620 && mx<=770 ? swing_amt=clamp((mx-628)/130,0,0.75);
+
+  // Resolve the dynamic lane row under the pointer.
+  hit_lane=-1; hit_y=218; hit_h=54; scan_lane=0;
+  while(scan_lane<7 && hit_lane<0) (
+    scan_collapsed=(scan_lane>=3 && mem[collapsed_base+scan_lane]!=0);
+    scan_h=scan_collapsed ? 26 : 54;
+    my>=hit_y && my<hit_y+scan_h ? (hit_lane=scan_lane; hit_h=scan_h;);
+    hit_y+=scan_h+8;
+    scan_lane+=1;
+  );
+
+  pressed ? (
+    my<62 && mx>=258 && mx<296 ? do_random_all() :
+    dropdown>=0 && my>=menu_y && my<menu_y+menu_count*25+8 ? (
+      mi=floor((my-menu_y-4)/25);
+      mi>=0 && mi<menu_count ? (
+        dropdown==0 ? (steps=mi==0?8:16; global_end=steps-1;);
+        dropdown==1 ? direction=mi;
+        dropdown==2 ? rate_index=mi;
+        dropdown==4 ? channel=mi;
+        dropdown==6 ? scale_type=mi;
+        dropdown==7 ? (root_note=mi; base_note=60+root_note;);
+        dropdown==9 ? mem[lane_dir_base+dropdown_lane]=mi;
+      );
+      dropdown=-1;
+    ) : (
+      dropdown=-1;
+      my>=76 && my<=118 ? (
+        mx>=18 && mx<158 ? dropdown=6 :
+        mx>=166 && mx<250 ? dropdown=7 :
+        mx>=258 && mx<358 ? dropdown=0 :
+        mx>=366 && mx<496 ? dropdown=1 :
+        mx>=504 && mx<612 ? dropdown=2 :
+        mx>=778 && mx<868 ? dropdown=4;
+      ) :
+      hit_lane>=0 ? (
+        lane=hit_lane;
+        y=hit_y;
+        collapsed=(lane>=3 && mem[collapsed_base+lane]!=0);
+        collapsed && mx>=28 && mx<144 ? mem[collapsed_base+lane]=0 :
+        !collapsed && mx>=28 && mx<118 ? (selected_lane=lane; dropdown=9; dropdown_lane=lane; dropdown_y=y;) :
+        !collapsed && mx>=150 && mx<192 ? do_random(lane) :
+        !collapsed && mx>=198 && mx<240 ? do_reset(lane) :
+        collapsed && mx>=198 && mx<240 ? mem[collapsed_base+lane]=0 :
+        collapsed && mx>=290 && mx<320 ? mem[collapsed_base+lane]=0 :
+        !collapsed && lane<3 && mx>=244 && mx<286 ? (
+          drag_active=1; drag_mode=1; drag_lane=lane; drag_step=0;
+          drag_y=y; drag_start_mouse_y=my; drag_start_value=mem[range_base+lane];
+        ) :
+        !collapsed && lane>=3 && mx>=290 && mx<320 ? mem[collapsed_base+lane]=1 :
+        !collapsed && mx>=340 && mx<1132 ? (
+          st=clamp(floor((mx-340)/colw),0,steps-1);
+          selected_lane=lane; selected_step=st;
+          // Capture the exact lane and step at mouse-down. Keep editing this cell
+          // until the left mouse button is released, regardless of pointer position.
+          drag_active=1; drag_mode=0; drag_lane=lane; drag_step=st; drag_y=y;
+          drag_start_mouse_y=my; drag_start_value=mem[lane_base(lane)+st];
+        );
+      ) :
+      my>=145 && my<183 && mx>=340 && mx<1132 ? (
+        st=clamp(floor((mx-340)/colw),0,steps-1);
+        mem[active_base+st]=1-mem[active_base+st];
+        mem[active_base+st] ? global_end=max(global_end,st);
+        selected_step=st;
+      );
+    );
+  );
+
+  rpressed ? (
+    my>=145 && my<183 && mx>=340 && mx<1132 ? (
+      st=clamp(floor((mx-340)/colw),0,steps-1); global_end=st; selected_step=st;
+    ) :
+    hit_lane>=0 && ! (hit_lane>=3 && mem[collapsed_base+hit_lane]!=0) && mx>=340 && mx<1132 ? (
+      st=clamp(floor((mx-340)/colw),0,steps-1);
+      mem[lane_steps_base+hit_lane]=st+1; selected_lane=hit_lane; selected_step=st;
+    );
+  );
+
+  // Drag-edit the captured cell. The lane and step are locked at mouse-down;
+  // dragging outside the cell, lane, or step grid never changes the target.
+  md && drag_active ? (
+    lane=drag_lane;
+    drag_mode==1 ? (
+      // Range dragging affects only the random dice, never direct step editing.
+      range_max=lane_range_max(lane);
+      range_min=lane_range_min(lane);
+      vv=drag_start_value+(drag_start_mouse_y-my)*(range_max-range_min)/54;
+      mem[range_base+lane]=clamp(floor(vv+0.5),range_min,range_max);
+    ) : (
+      st=drag_step; y=drag_y;
+      selected_lane=lane; selected_step=st;
+      st+1>mem[lane_steps_base+lane] ? mem[lane_steps_base+lane]=st+1;
+      lo=lane_lo(lane); hi=lane_hi(lane);
+      // Relative vertical dragging: mouse-down preserves the current value.
+      // Moving upward increases the value; moving downward decreases it.
+      // The drag target remains locked to the original lane and step.
+      vv=drag_start_value+(drag_start_mouse_y-my)*(hi-lo)/54;
+      mem[lane_base(lane)+st]=clamp(floor(vv+0.5),lo,hi);
+    );
+  );
+  !md ? (drag_active=0; drag_lane=-1; drag_mode=0;);
+
+  mouse_was_down=md; mouse_was_right=rd;
+  gfx_dest=-1;
+  gfx_x=0; gfx_y=0;
+  gfx_blit(0,1,0,0,0,1180,700,0,0,gfx_w,gfx_h);
+
+@serialize
+
+  file_var(0,steps);
+  file_var(0,direction);
+  file_var(0,rate_index);
+  file_var(0,swing_amt);
+  file_var(0,channel);
+  file_var(0,base_note);
+  file_var(0,quantize);
+  file_var(0,root_note);
+  file_var(0,scale_type);
+
+  i=0;
+
+  loop(16,
+    file_var(0,mem[pitch_base+i]);
+    file_var(0,mem[octave_base+i]);
+    file_var(0,mem[velocity_base+i]);
+    file_var(0,mem[length_base+i]);
+    file_var(0,mem[ratchet_base+i]);
+    file_var(0,mem[condition_base+i]);
+    file_var(0,mem[shift_base+i]);
+    file_var(0,mem[active_base+i]);
+    i+=1;
+  );
+
+  i=0;
+
+  loop(7,
+    file_var(0,mem[lane_dir_base+i]);
+    file_var(0,mem[lane_start_base+i]);
+    file_var(0,mem[lane_end_base+i]);
+    file_var(0,mem[lane_min_base+i]);
+    file_var(0,mem[lane_max_base+i]);
+    file_var(0,mem[lane_steps_base+i]);
+    i+=1;
+  );
+  file_avail(0)!=0 ? file_var(0,global_end);
+  i=3;
+  loop(4,
+    file_var(0,mem[collapsed_base+i]);
+    i+=1;
+  );
+
+  // Version 1.4.1: per-lane dice ranges anchored at zero. Older projects retain initialized defaults.
+  i=0;
+  loop(3,
+    file_avail(0)!=0 ? file_var(0,mem[range_base+i]);
+    mem[range_base+i]=clamp(mem[range_base+i],lane_range_min(i),lane_range_max(i));
+    i+=1;
+  );
+
+  // Enforce the current v1.4.1 ranges even when loading older project states.
+  mem[lane_min_base+0]=-12; mem[lane_max_base+0]=12;
+  mem[lane_min_base+1]=-3;  mem[lane_max_base+1]=3;
+  mem[lane_min_base+2]=0;   mem[lane_max_base+2]=127;
+  mem[lane_min_base+3]=0;   mem[lane_max_base+3]=100;
+  mem[lane_min_base+4]=0;   mem[lane_max_base+4]=6;
+  mem[lane_min_base+5]=-10; mem[lane_max_base+5]=10;
+  mem[lane_min_base+6]=0;   mem[lane_max_base+6]=100;
+  i=0;
+  loop(16,
+    mem[pitch_base+i]=clamp(mem[pitch_base+i],-12,12);
+    mem[octave_base+i]=clamp(mem[octave_base+i],-3,3);
+    mem[velocity_base+i]=clamp(mem[velocity_base+i],0,127);
+    mem[length_base+i]=clamp(mem[length_base+i],0,100);
+    mem[ratchet_base+i]=clamp(mem[ratchet_base+i],0,6);
+    mem[condition_base+i]=clamp(mem[condition_base+i],-10,10);
+    mem[shift_base+i]=clamp(mem[shift_base+i],0,100);
+    i+=1;
+  );
